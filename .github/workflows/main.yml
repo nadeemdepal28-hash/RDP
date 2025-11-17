@@ -167,7 +167,7 @@ jobs:
         run: |
           $adminDesktop = "C:\Users\Administrator\Desktop"
 
-          # --- Python ---
+          # --- Python 3.13 ---
           $pythonUrl = "https://www.python.org/ftp/python/3.13.3/python-3.13.3-amd64.exe"
           $pythonInstaller = Join-Path $env:TEMP "python.exe"
           Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonInstaller
@@ -176,15 +176,15 @@ jobs:
           Remove-Item $pythonInstaller -Force
 
           # --- VS Code ---
-          $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64/stable"
+          $vscodeUrl = "https://vscode.download.prss.microsoft.com/dbazure/download/stable/ac4cbdf48759c7d8c3eb91ffe6bb04316e263c57/VSCodeUserSetup-x64-1.106.0.exe"
           $vscodeInstaller = Join-Path $env:TEMP "vscode.exe"
           Invoke-WebRequest -Uri $vscodeUrl -OutFile $vscodeInstaller
           Write-Host "Installing VS Code silently..."
           Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
           Remove-Item $vscodeInstaller -Force
 
-          # --- PIA ---
-          $piaUrl = "https://www.privateinternetaccess.com/installer/pia-windows-x64.exe"
+          # --- PIA VPN ---
+          $piaUrl = "https://installers.privateinternetaccess.com/download/pia-windows-x64-3.7-08412.exe"
           $piaInstaller = Join-Path $env:TEMP "pia.exe"
           Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller
           Write-Host "Installing PIA silently..."
