@@ -1,0 +1,200 @@
+name: RDP Setup and Software Installation
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Configure Core RDP Settings
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Fixed Password
+        run: |
+          $password = 'Zain.rty123'
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          if (Get-LocalUser -Name "Administrator" -ErrorAction SilentlyContinue) {
+              Set-LocalUser -Name "Administrator" -Password $securePass
+          } else {
+              New-LocalUser -Name "Administrator" -Password $securePass -AccountNeverExpires
+          }
+
+          if (-not (Get-LocalGroupMember -Group "Administrators" -Member "Administrator" -ErrorAction SilentlyContinue)) {
+              Add-LocalGroupMember -Group "Administrators" -Member "Administrator"
+          }
+          if (-not (Get-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator" -ErrorAction SilentlyContinue)) {
+              Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator"
+          }
+
+          echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
+          
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
+
+          $tsIP = $null
+          $retries = 0
+          while (-not $tsIP -and $retries -lt 10) {
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
+              $retries++
+          }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
+          Write-Host "TCP connectivity successful!"
+
+      - name: Force Create Administrator Profile (best-effort)
+        run: |
+          $adminProfile = "C:\Users\Administrator"
+          if (-not (Test-Path $adminProfile)) {
+            Write-Host "Administrator profile missing — attempting to create from Default..."
+            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
+            try {
+              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+            } catch {
+              Write-Host "icacls failed to set permissions; continuing."
+            }
+          } else {
+            Write-Host "Administrator profile already exists."
+          }
+
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+          if (-not (Test-Path $adminDesktop)) {
+            New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
+          }
+
+      - name: Download, Extract and Deploy (Contents Only)
+        run: |
+          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+          $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
+          $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
+
+          $publicDesktop = "C:\Users\Public\Desktop"
+          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
+
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+          $adminDesktopExists = Test-Path $adminDesktop
+
+          try {
+            Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+
+            $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
+            $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+            if (-not $sevenZipExe) {
+              choco install 7zip -y
+              $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+            }
+
+            if (-not $sevenZipExe) {
+              Write-Error "7-Zip not found or failed to install."
+              exit 1
+            }
+
+            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
+            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+
+            & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
+
+            # Find inner folder
+            $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+            if (-not $innerFolder) { Write-Error "No folder found in archive."; exit 1 }
+
+            Write-Host "Copying CONTENTS to Public Desktop..."
+            Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
+              $dest = Join-Path $publicDesktop $_.Name
+              if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
+            }
+
+            if ($adminDesktopExists) {
+              Write-Host "Copying CONTENTS to Administrator Desktop..."
+              Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
+                $dest = Join-Path $adminDesktop $_.Name
+                if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
+              }
+            }
+
+            Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
+            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+
+          } catch {
+            Write-Error "Failed during download/extract/deploy: $_"
+            exit 1
+          }
+
+      - name: Install VS Code and PIA from Administrator Desktop
+        run: |
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+
+          # Install VS Code
+          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64-1.103.0.exe"
+          if (Test-Path $vscodeInstaller) {
+              Write-Host "Installing VS Code silently..."
+              Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
+          } else {
+              Write-Host "VS Code installer not found on Administrator Desktop."
+          }
+
+          # Install PIA
+          $piaInstaller = Join-Path $adminDesktop "pia-windows-x64-3.6.1-08339.exe"
+          if (Test-Path $piaInstaller) {
+              Write-Host "Installing PIA silently..."
+              Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait
+          } else {
+              Write-Host "PIA installer not found on Administrator Desktop."
+          }
+
+      - name: Maintain RDP Connection
+        run: |
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: Administrator"
+          Write-Host "Password: $env:RDP_CREDS"
+          Write-Host "==================`n"
+
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active"
+              Start-Sleep -Seconds 300
+          }
