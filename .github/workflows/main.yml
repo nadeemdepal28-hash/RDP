@@ -138,7 +138,6 @@ jobs:
 
             & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
 
-            # Find inner folder
             $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
             if (-not $innerFolder) { Write-Error "No folder found in archive."; exit 1 }
 
@@ -164,27 +163,33 @@ jobs:
             exit 1
           }
 
-      - name: Install VS Code and PIA from Administrator Desktop
+      - name: Install Python, VS Code, and PIA (official downloads)
         run: |
           $adminDesktop = "C:\Users\Administrator\Desktop"
 
-          # Install VS Code
-          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64-1.103.0.exe"
-          if (Test-Path $vscodeInstaller) {
-              Write-Host "Installing VS Code silently..."
-              Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
-          } else {
-              Write-Host "VS Code installer not found on Administrator Desktop."
-          }
+          # --- Python ---
+          $pythonUrl = "https://www.python.org/ftp/python/3.13.3/python-3.13.3-amd64.exe"
+          $pythonInstaller = Join-Path $env:TEMP "python.exe"
+          Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonInstaller
+          Write-Host "Installing Python silently..."
+          Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
+          Remove-Item $pythonInstaller -Force
 
-          # Install PIA
-          $piaInstaller = Join-Path $adminDesktop "pia-windows-x64-3.6.1-08339.exe"
-          if (Test-Path $piaInstaller) {
-              Write-Host "Installing PIA silently..."
-              Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait
-          } else {
-              Write-Host "PIA installer not found on Administrator Desktop."
-          }
+          # --- VS Code ---
+          $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64/stable"
+          $vscodeInstaller = Join-Path $env:TEMP "vscode.exe"
+          Invoke-WebRequest -Uri $vscodeUrl -OutFile $vscodeInstaller
+          Write-Host "Installing VS Code silently..."
+          Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode" -Wait
+          Remove-Item $vscodeInstaller -Force
+
+          # --- PIA ---
+          $piaUrl = "https://www.privateinternetaccess.com/installer/pia-windows-x64.exe"
+          $piaInstaller = Join-Path $env:TEMP "pia.exe"
+          Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller
+          Write-Host "Installing PIA silently..."
+          Start-Process -FilePath $piaInstaller -ArgumentList "/S" -Wait
+          Remove-Item $piaInstaller -Force
 
       - name: Maintain RDP Connection
         run: |
