@@ -21,6 +21,7 @@ jobs:
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
+
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
           Restart-Service -Name TermService -Force
 
@@ -48,6 +49,7 @@ jobs:
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
+          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
@@ -56,6 +58,7 @@ jobs:
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
+
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -63,29 +66,38 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-          if (-not $tsIP) { Write-Error "Tailscale IP not assigned. Exiting."; exit 1 }
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
+              exit 1
+          }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) { Write-Error "TCP connection to RDP port 3389 failed"; exit 1 }
+          if (-not $testResult.TcpTestSucceeded) {
+              Write-Error "TCP connection to RDP port 3389 failed"
+              exit 1
+          }
           Write-Host "TCP connectivity successful!"
 
-      - name: Force Create Administrator Profile
+      - name: Ensure Administrator Profile & Desktop (Robocopy)
         run: |
           $adminProfile = "C:\Users\Administrator"
+          $adminDesktop = "$adminProfile\Desktop"
+
           if (-not (Test-Path $adminProfile)) {
-            Write-Host "Administrator profile missing — creating from Default..."
-            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
-            icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+              Write-Host "Administrator profile missing — creating from Default..."
+              robocopy "C:\Users\Default" $adminProfile /MIR /XD "AppData\Local\Application Data" /MT:4
+              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+          } else {
+              Write-Host "Administrator profile already exists."
           }
 
-          $adminDesktop = "C:\Users\Administrator\Desktop"
           if (-not (Test-Path $adminDesktop)) { New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null }
 
-      - name: Download, Extract and Deploy Software
+      - name: Download, Extract and Deploy sOFTWARES Contents
         run: |
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
@@ -95,47 +107,57 @@ jobs:
           Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
 
           $sevenZipExe = "C:\Program Files\7-Zip\7z.exe"
-          if (-not (Test-Path $sevenZipExe)) { choco install 7zip -y }
-
-          if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
-          New-Item -ItemType Directory -Path $extractPath | Out-Null
+          if (-not (Test-Path $sevenZipExe)) { choco install 7zip -y; Start-Sleep -Seconds 10 }
 
           & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
 
-          # Copy CONTENTS only to Administrator Desktop
-          $innerFolder = Get-ChildItem $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
-          Get-ChildItem $innerFolder.FullName | ForEach-Object {
-            $dest = Join-Path $adminDesktop $_.Name
-            if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
+          $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+          Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
+              $dest = Join-Path $adminDesktop $_.Name
+              if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
           }
 
           Remove-Item $downloadPath -Force
           Remove-Item $extractPath -Recurse -Force
 
-      - name: Install Python, VS Code, and PIA (Portable / Official Downloads)
+      - name: Download & Install Software Officially
         run: |
           $adminDesktop = "C:\Users\Administrator\Desktop"
 
-          # --- Python Portable ---
-          $pythonUrl = "https://www.python.org/ftp/python/3.13.3/python-3.13.3-embed-amd64.zip"
-          $pythonZip = Join-Path $env:TEMP "python.zip"
-          Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonZip
-          Expand-Archive $pythonZip -DestinationPath "$adminDesktop\Python"
-          Remove-Item $pythonZip -Force
+          # Download VS Code Installer
+          $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64-user/stable"
+          $vscodeInstaller = Join-Path $adminDesktop "VSCodeUserSetup-x64.exe"
+          Invoke-WebRequest -Uri $vscodeUrl -OutFile $vscodeInstaller
+          Start-Process -FilePath $vscodeInstaller -ArgumentList "/verysilent /mergetasks=!runcode /norestart" -Wait
 
-          # --- VS Code Portable ---
-          $vscodeUrl = "https://update.code.visualstudio.com/latest/win32-x64/stable"
-          $vscodeZip = Join-Path $env:TEMP "vscode.zip"
-          Invoke-WebRequest -Uri $vscodeUrl -OutFile $vscodeZip
-          Expand-Archive $vscodeZip -DestinationPath "$adminDesktop\VSCode"
-          Remove-Item $vscodeZip -Force
+          # Download PIA Installer
+          $piaUrl = "https://www.privateinternetaccess.com/installer/pia-windows-x64-latest.exe"
+          $piaInstaller = Join-Path $adminDesktop "pia-windows-x64.exe"
+          Invoke-WebRequest -Uri $piaUrl -OutFile $piaInstaller
+          Start-Process -FilePath $piaInstaller -ArgumentList "/S /norestart" -Wait
 
-          # --- PIA Installer (Silent) ---
-          $piaUrl = "https://installers.privateinternetaccess.com/download/pia-windows-x64-3.7-08412.exe"
-          $piaExe = Join-Path $env:TEMP "pia.exe"
-          Invoke-WebRequest -Uri $piaUrl -OutFile $piaExe
-          Start-Process -FilePath $piaExe -ArgumentList "/S" -Wait
-          Remove-Item $piaExe -Force
+          # Download Python Installer (example Python 3.12)
+          $pythonUrl = "https://www.python.org/ftp/python/3.12.2/python-3.12.2-amd64.exe"
+          $pythonInstaller = Join-Path $adminDesktop "python-3.12.2-amd64.exe"
+          Invoke-WebRequest -Uri $pythonUrl -OutFile $pythonInstaller
+          Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1 Include_pip=1 /norestart" -Wait
+
+      - name: Verify Installed Software
+        run: |
+          # VS Code
+          if (Test-Path "C:\Users\Administrator\AppData\Local\Programs\Microsoft VS Code\Code.exe") {
+              Write-Host "VS Code installed successfully."
+          } else { Write-Error "VS Code installation FAILED!" }
+
+          # PIA
+          if (Test-Path "C:\Program Files\Private Internet Access\pia.exe") {
+              Write-Host "PIA installed successfully."
+          } else { Write-Error "PIA installation FAILED!" }
+
+          # Python
+          if (Get-Command python -ErrorAction SilentlyContinue) {
+              Write-Host "Python installed successfully."
+          } else { Write-Error "Python installation FAILED!" }
 
       - name: Maintain RDP Connection
         run: |
@@ -144,7 +166,6 @@ jobs:
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
-
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active"
               Start-Sleep -Seconds 300
