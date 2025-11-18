@@ -1,4 +1,4 @@
-name: RDP Setup and Software Installation
+name: RDP Setup (WITH sOFTWARES Extraction ONLY)
 
 on:
   workflow_dispatch:
@@ -23,7 +23,6 @@ jobs:
                              -Name "SecurityLayer" -Value 0 -Force
 
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Password
@@ -44,21 +43,20 @@ jobs:
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "Administrator"
           }
 
-          echo "RDP_CREDS=User: Administrator | Password: $password" >> $env:GITHUB_ENV
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
+
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
           $authKey = "${{ secrets.TAILSCALE_AUTH_KEY }}"
-          
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=$authKey --hostname=gh-runner-$env:GITHUB_RUN_ID
 
           $tsIP = $null
@@ -69,101 +67,59 @@ jobs:
               $retries++
           }
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
+              Write-Error "Tailscale IP not assigned."
               exit 1
           }
+
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Ensure Administrator Profile & Desktop
+        run: |
+          $adminProfile = "C:\Users\Administrator"
+          if (-not (Test-Path $adminProfile)) {
+            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force
+            icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+          }
+          $adminDesktop = "$adminProfile\Desktop"
+          if (-not (Test-Path $adminDesktop)) { New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null }
+
+      - name: Download, Extract and Deploy sOFTWARES Contents
+        run: |
+          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
+          $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
+          $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
+          $adminDesktop = "C:\Users\Administrator\Desktop"
+
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+
+          $sevenZipExe = "C:\Program Files\7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZipExe)) { choco install 7zip -y; Start-Sleep -Seconds 10 }
+
+          & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
+
+          $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
+
+          Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
+              $dest = Join-Path $adminDesktop $_.Name
+              if ($_.PSIsContainer) {
+                  Copy-Item $_.FullName $dest -Recurse -Force
+              } else {
+                  Copy-Item $_.FullName $dest -Force
+              }
+          }
+
+          Remove-Item $downloadPath -Force
+          Remove-Item $extractPath -Recurse -Force
 
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
               exit 1
           }
-          Write-Host "TCP connectivity successful!"
-
-      - name: Force Create Administrator Profile (best-effort)
-        run: |
-          $adminProfile = "C:\Users\Administrator"
-          if (-not (Test-Path $adminProfile)) {
-            Write-Host "Administrator profile missing — attempting to create from Default..."
-            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force -ErrorAction SilentlyContinue
-            try {
-              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
-            } catch {
-              Write-Host "icacls failed to set permissions; continuing."
-            }
-          } else {
-            Write-Host "Administrator profile already exists."
-          }
-
-          $adminDesktop = "C:\Users\Administrator\Desktop"
-          if (-not (Test-Path $adminDesktop)) {
-            New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
-          }
-
-      - name: Download, Extract and Deploy (Contents Only)
-        run: |
-          $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
-          $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
-          $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
-
-          $publicDesktop = "C:\Users\Public\Desktop"
-          if (-not (Test-Path $publicDesktop)) { New-Item -ItemType Directory -Path $publicDesktop -Force | Out-Null }
-
-          # REDFINING Administrator Desktop path in this step
-          $adminDesktop = "C:\Users\Administrator\Desktop"
-          $adminDesktopExists = Test-Path $adminDesktop
-
-          try {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
-
-            $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
-            $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-            if (-not $sevenZipExe) {
-              choco install 7zip -y
-              $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            }
-
-            if (-not $sevenZipExe) {
-              Write-Error "7-Zip not found or failed to install."
-              exit 1
-            }
-
-            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-
-            & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
-
-            # Find inner folder
-            $innerFolder = Get-ChildItem -Path $extractPath | Where-Object { $_.PSIsContainer } | Select-Object -First 1
-            if (-not $innerFolder) { Write-Error "No folder found in archive."; exit 1 }
-
-            Write-Host "Copying CONTENTS to Public Desktop..."
-            Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
-              $dest = Join-Path $publicDesktop $_.Name
-              if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
-            }
-
-            if ($adminDesktopExists) {
-              Write-Host "Copying CONTENTS to Administrator Desktop..."
-              Get-ChildItem -Path $innerFolder.FullName | ForEach-Object {
-                $dest = Join-Path $adminDesktop $_.Name
-                if ($_.PSIsContainer) { Copy-Item $_.FullName $dest -Recurse -Force } else { Copy-Item $_.FullName $dest -Force }
-              }
-            }
-
-            Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-
-          } catch {
-            Write-Error "Failed during download/extract/deploy: $_"
-            exit 1
-          }
+          Write-Host "TCP OK"
 
       - name: Maintain RDP Connection
         run: |
@@ -172,7 +128,6 @@ jobs:
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
-
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active"
               Start-Sleep -Seconds 300
