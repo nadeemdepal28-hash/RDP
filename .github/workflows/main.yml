@@ -63,58 +63,69 @@ jobs:
         run: |
           Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
 
-      - name: Download and Extract sOFTWARES (Force Copy to Administrator Desktop)
+      - name: Download, Extract, and Copy sOFTWARES to REAL Administrator Desktop
         run: |
-          Write-Host "=== PREPARING ADMINISTRATOR PROFILE ==="
+          Write-Host "=== DETECTING ADMINISTRATOR DESKTOPS ==="
 
-          # FORCE CREATE Administrator profile structure
-          $adminRoot = "C:\Users\Administrator"
-          $adminDesk = "C:\Users\Administrator\Desktop"
+          # Detect Administrator desktops including shadow profiles
+          $desktopTargets = @()
+          $profiles = Get-ChildItem "C:\Users" -Directory | Where-Object {
+            $_.Name -eq "Administrator" -or $_.Name -like "Administrator.*"
+          }
 
-          New-Item -ItemType Directory -Force -Path $adminRoot | Out-Null
-          New-Item -ItemType Directory -Force -Path $adminDesk | Out-Null
-          New-Item -ItemType Directory -Force -Path "$adminRoot\Downloads" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$adminRoot\AppData\Roaming" -ErrorAction SilentlyContinue | Out-Null
-          New-Item -ItemType Directory -Force -Path "$adminRoot\AppData\Local" -ErrorAction SilentlyContinue | Out-Null
-          New-Item -ItemType Directory -Force -Path "$adminRoot\AppData\LocalLow" -ErrorAction SilentlyContinue | Out-Null
+          foreach ($prof in $profiles) {
+            $desk = Join-Path $prof.FullName "Desktop"
+            if (!(Test-Path $desk)) {
+              New-Item -ItemType Directory -Force -Path $desk | Out-Null
+            }
+            Write-Host "[+] Found Administrator desktop: $desk"
+            $desktopTargets += $desk
+          }
 
-          Write-Host "[+] Administrator profile folders created."
+          if ($desktopTargets.Count -eq 0) {
+            Write-Error "NO Administrator desktop found. Something is wrong."
+            exit 1
+          }
 
-          # Variables
+          Write-Host "=== ADMIN DESKTOP TARGETS ==="
+          $desktopTargets | ForEach-Object { Write-Host " --> $_" }
+
+          # Prepare download/extract
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = "$env:TEMP\sOFTWARES.rar"
           $extractPath = "$env:TEMP\sOFTWARES_extracted"
 
           Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
 
-          # Ensure 7-Zip exists
-          $sevenZip = "C:\Program Files\7-Zip\7z.exe"
-          if (!(Test-Path $sevenZip)) {
+          # Ensure 7zip exists
+          $sevenZipCandidates = @(
+            "C:\Program Files\7-Zip\7z.exe",
+            "C:\Program Files (x86)\7-Zip\7z.exe"
+          )
+          $sevenZip = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+          if (-not $sevenZip) {
             choco install 7zip -y
+            $sevenZip = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           }
 
-          if (!(Test-Path $sevenZip)) { 
-            Write-Error "7-Zip failed to install."
-            exit 1 
+          if (-not $sevenZip) {
+            Write-Error "7-Zip could not be installed."
+            exit 1
           }
 
           # Extract
-          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+          if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
           New-Item -ItemType Directory -Path $extractPath | Out-Null
           & "$sevenZip" x "$downloadPath" "-o$extractPath" -y
 
-          Write-Host "=== COPYING FILES TO ADMINISTRATOR DESKTOP ==="
-
-          Get-ChildItem $extractPath | ForEach-Object {
-              $dest = Join-Path $adminDesk $_.Name
-              if ($_.PSIsContainer) {
-                  Copy-Item $_.FullName -Destination $dest -Recurse -Force
-              } else {
-                  Copy-Item $_.FullName -Destination $adminDesk -Force
-              }
+          Write-Host "=== COPYING TO ALL ADMINISTRATOR DESKTOPS ==="
+          foreach ($desk in $desktopTargets) {
+            Write-Host "Copying files to: $desk"
+            Copy-Item "$extractPath\*" -Destination $desk -Recurse -Force
           }
 
-          Write-Host "[✔] All files copied to:  C:\Users\Administrator\Desktop"
+          Write-Host "[✔] All files copied to all Administrator desktops."
 
       - name: Maintain RDP Connection
         run: |
