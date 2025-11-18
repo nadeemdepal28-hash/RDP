@@ -17,7 +17,7 @@ jobs:
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force  
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
 
           netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
 
@@ -54,7 +54,7 @@ jobs:
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
@@ -91,58 +91,121 @@ jobs:
 
           Write-Host "TCP connectivity successful!"
 
-      - name: Download and Extract sOFTWARES
+      - name: Download and Extract sOFTWARES and Copy to All Administrator Desktops
         run: |
+          # Variables
           $downloadUrl = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath = Join-Path $env:TEMP "sOFTWARES.rar"
           $extractPath = Join-Path $env:TEMP "sOFTWARES_extracted"
 
-          # FIXED: COPY TO ADMINISTRATOR DESKTOP  
-          $desktopPath = "C:\Users\Administrator\Desktop"
-
-          # Create Administrator desktop folder if missing  
-          if (-not (Test-Path $desktopPath)) {
-              New-Item -ItemType Directory -Path $desktopPath -Force | Out-Null
+          Write-Host "Downloading sOFTWARES archive..."
+          try {
+              Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+          } catch {
+              Write-Error "Failed to download $downloadUrl : $_"
+              exit 1
           }
 
-          try {
-            Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing -ErrorAction Stop
+          Write-Host "Ensuring 7-Zip is available..."
+          $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
+          $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 
-            $sevenZipCandidates = @("C:\Program Files\7-Zip\7z.exe", "C:\Program Files (x86)\7-Zip\7z.exe")
-            $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-            if (-not $sevenZipExe) {
+          if (-not $sevenZipExe) {
               choco install 7zip -y
               $sevenZipExe = $sevenZipCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-            }
+          }
 
-            if (-not $sevenZipExe) {
+          if (-not $sevenZipExe) {
               Write-Error "7-Zip not found or failed to install."
               exit 1
-            }
-
-            if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
-
-            & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
-
-            Get-ChildItem -Path $extractPath -Force | ForEach-Object {
-              $dest = Join-Path $desktopPath $_.Name
-              if ($_.PSIsContainer) {
-                Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
-              } else {
-                Copy-Item -Path $_.FullName -Destination $desktopPath -Force -ErrorAction Stop
-              }
-            }
-
-            Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
-            Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
-
-            Write-Host "sOFTWARES downloaded, extracted, and all contents copied to Administrator Desktop."
-          } catch {
-            Write-Error "Failed to download/extract/copy sOFTWARES: $_"
-            exit 1
           }
+
+          # Extract
+          if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue }
+          New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
+
+          Write-Host "Extracting archive to $extractPath ..."
+          & "$sevenZipExe" x "$downloadPath" "-o$extractPath" -y
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "7z extraction failed with exit code $LASTEXITCODE"
+              exit 1
+          }
+
+          # Detect Administrator desktop folders (standard, RDP-created variants, and Public)
+          Write-Host "Detecting Administrator desktop locations..."
+          $adminDesktops = @()
+
+          # Standard Administrator desktop
+          $std = "C:\Users\Administrator\Desktop"
+          if (Test-Path $std) {
+              $adminDesktops += $std
+              Write-Host "[+] Found: $std"
+          } else {
+              Write-Host "[-] Standard Administrator desktop not present yet: $std"
+          }
+
+          # Administrator.* variants (e.g., Administrator.<HOSTNAME>)
+          $variants = @()
+          try {
+              $variants = Get-ChildItem "C:\Users" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "Administrator*" }
+          } catch {
+              Write-Host "Warning: failed to enumerate C:\Users: $_"
+          }
+
+          foreach ($v in $variants) {
+              $desk = Join-Path $v.FullName "Desktop"
+              # Avoid adding duplicates
+              if ($adminDesktops -notcontains $desk -and (Test-Path $desk)) {
+                  $adminDesktops += $desk
+                  Write-Host "[+] Found variant desktop: $desk"
+              }
+          }
+
+          # Public desktop (visible to all users)
+          $publicDesk = "C:\Users\Public\Desktop"
+          if (Test-Path $publicDesk) {
+              if ($adminDesktops -notcontains $publicDesk) {
+                  $adminDesktops += $publicDesk
+                  Write-Host "[+] Found Public Desktop: $publicDesk"
+              }
+          }
+
+          if ($adminDesktops.Count -eq 0) {
+              Write-Host "No Administrator or Public desktop folders currently exist. Creating standard Administrator desktop path: $std"
+              New-Item -ItemType Directory -Path $std -Force | Out-Null
+              $adminDesktops += $std
+          }
+
+          Write-Host "Desktop targets to copy to:"
+          $adminDesktops | ForEach-Object { Write-Host " - $_" }
+
+          # Copy extracted contents to every detected desktop
+          foreach ($desk in $adminDesktops) {
+              Write-Host "Copying contents to: $desk"
+              if (-not (Test-Path $desk)) {
+                  Write-Host "Creating missing desktop folder: $desk"
+                  New-Item -ItemType Directory -Path $desk -Force | Out-Null
+              }
+
+              Get-ChildItem -Path $extractPath -Force | ForEach-Object {
+                  $dest = Join-Path $desk $_.Name
+                  try {
+                      if ($_.PSIsContainer) {
+                          Copy-Item -Path $_.FullName -Destination $dest -Recurse -Force -ErrorAction Stop
+                      } else {
+                          Copy-Item -Path $_.FullName -Destination $desk -Force -ErrorAction Stop
+                      }
+                  } catch {
+                      Write-Host "Warning: failed to copy $_.FullName to $desk : $_"
+                  }
+              }
+          }
+
+          # Cleanup
+          Remove-Item $downloadPath -Force -ErrorAction SilentlyContinue
+          Remove-Item $extractPath -Recurse -Force -ErrorAction SilentlyContinue
+
+          Write-Host "sOFTWARES downloaded, extracted, and copied to detected Administrator/Public desktop folders."
 
       - name: Maintain RDP Connection
         run: |
@@ -151,7 +214,7 @@ jobs:
           Write-Host "Username: Administrator"
           Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
-          
+
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C to terminate"
               Start-Sleep -Seconds 300
