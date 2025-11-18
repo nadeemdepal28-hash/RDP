@@ -82,18 +82,29 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Force Create Administrator Profile
+      - name: Force Create Minimal Administrator Profile
         run: |
           $adminProfile = "C:\Users\Administrator"
+          $folders = @("Desktop","Documents","Downloads")
+
           if (-not (Test-Path $adminProfile)) {
-            Write-Host "Administrator profile missing — creating from Default..."
-            Copy-Item -Path "C:\Users\Default" -Destination $adminProfile -Recurse -Force
-            try { icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null } catch { Write-Host "ACL set failed" }
+              Write-Host "Administrator profile missing — creating minimal structure..."
+              New-Item -ItemType Directory -Path $adminProfile -Force | Out-Null
           }
 
-          $adminDesktop = "C:\Users\Administrator\Desktop"
-          if (-not (Test-Path $adminDesktop)) {
-            New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null
+          foreach ($f in $folders) {
+              $path = Join-Path $adminProfile $f
+              if (-not (Test-Path $path)) {
+                  New-Item -ItemType Directory -Path $path -Force | Out-Null
+                  Write-Host "Created: $path"
+              }
+          }
+
+          try {
+              icacls $adminProfile /grant "Administrator:(OI)(CI)F" /T | Out-Null
+              Write-Host "Permissions granted."
+          } catch {
+              Write-Host "Failed to set ACLs: $_"
           }
 
       - name: Download, Extract and Deploy (DEBUG VERBOSE)
@@ -103,11 +114,7 @@ jobs:
           $downloadUrl   = "https://github.com/Zaiinalii/RDP/releases/download/v1/sOFTWARES.rar"
           $downloadPath  = Join-Path $env:TEMP "sOFTWARES.rar"
           $extractPath   = Join-Path $env:TEMP "sOFTWARES_extracted"
-          $adminProfile  = "C:\Users\Administrator"
           $adminDesktop  = "C:\Users\Administrator\Desktop"
-
-          Write-Host "DEBUG: Admin profile path: $adminProfile"
-          Write-Host "DEBUG: Admin Desktop path: $adminDesktop"
 
           if (-not (Test-Path $adminDesktop)) { New-Item -ItemType Directory -Path $adminDesktop -Force | Out-Null }
 
